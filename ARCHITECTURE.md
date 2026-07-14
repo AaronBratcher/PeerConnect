@@ -1,6 +1,6 @@
 # PeerConnect Architecture
 
-PeerConnect is a Swift package that wraps Apple's `MultipeerConnectivity` (MC) framework behind a simpler, role-based API. It handles the MC ceremony — session lifecycle, handshakes, delegate ownership transfers, thread safety — so callers work only with `Peer`, `PeerSession`, and three focused delegate protocols.
+PeerConnect is a Swift package that wraps Apple's `MultipeerConnectivity` (MC) framework behind a simpler, role-based API. It handles the MC ceremony — session lifecycle, handshakes, delegate ownership transfers, thread safety — so callers work only with `Peer`, `PeerSession`, and three focused delegate protocols. Every event is also available as a discrete Combine publisher, alongside (not instead of) the delegate methods — see [Combine](#combine) below.
 
 A second transport is also available: a direct TCP connection wrapped in TLS, for connecting to a specific IP address instead of discovering peers via MC/Bonjour. Both transports share the same `Peer`/`PeerAdvertiser`/`PeerBrowser`/`PeerSession` API — see [Transports](#transports) below.
 
@@ -58,6 +58,7 @@ Every participant is either an **advertiser** (server) or a **browser** (client)
 | `TCPTransport.swift` | internal | `PeerTransport` implementation wrapping a TLS-wrapped `NWConnection`; also owns the length-prefixed framing (`TCPFraming`) shared with the pre-session handshake |
 | `PeerTLSIdentity.swift` | internal | Generates the ephemeral self-signed TLS identity and TLS parameters for both sides of the TCP transport |
 | `PeerSessionCoordinator.swift` | public | Optional, shareable between a device's `PeerAdvertiser` and `PeerBrowser`; prevents parallel/duplicate sessions with the same peer |
+| `PeerConnectEvents.swift` | public | Value types for the Combine surface: `PeerConnectError`, `PeerConnectionRequest`, `PeerReceivingResourceEvent`, `PeerReceivedResourceEvent` |
 
 ---
 
@@ -102,6 +103,60 @@ When an attempt is refused this way, `allowConnectionRequest`/dialing never happ
 
 ---
 
+## Combine
+
+Every delegate method also has a matching, discrete Combine publisher — pick whichever style suits a given call site, or mix both (a publisher fires at exactly the same point, on exactly the same thread, as its delegate counterpart, since the `send(...)` call sits right next to the `delegate?.method(...)` call at each event site). None of this changes the delegate protocols or their existing behavior.
+
+**`PeerAdvertiser`:**
+```swift
+public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+public let connectionRequestPublisher: AnyPublisher<PeerConnectionRequest, Never>
+public let clientConnectedPublisher: AnyPublisher<PeerSession, Never>
+```
+
+**`PeerBrowser`** (also conforms to `ObservableObject`):
+```swift
+@Published public private(set) var nearbyServers: [Peer]
+
+public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+public let serverFoundPublisher: AnyPublisher<Peer, Never>
+public let serverLostPublisher: AnyPublisher<Peer, Never>
+public let unableToConnectPublisher: AnyPublisher<Peer, Never>
+public let connectionDeniedPublisher: AnyPublisher<Peer, Never>
+public let connectedPublisher: AnyPublisher<PeerSession, Never>
+public let duplicateConnectionRejectedPublisher: AnyPublisher<Peer, Never>
+```
+
+**`PeerSession`:**
+```swift
+public let disconnectedPublisher: AnyPublisher<Bool, Never>              // byRequest
+public let textReceivedPublisher: AnyPublisher<String, Never>
+public let dataReceivedPublisher: AnyPublisher<Data, Never>
+public let startedReceivingResourcePublisher: AnyPublisher<PeerReceivingResourceEvent, Never>
+public let resourceReceivedPublisher: AnyPublisher<PeerReceivedResourceEvent, Never>
+```
+`disconnectedPublisher`'s payload is just `byRequest` — unlike `PeerSessionDelegate.disconnected(_:byRequest:)`, there's no redundant `session` parameter, since a subscriber already holds the `PeerSession` instance it subscribed on.
+
+### `allowConnectionRequest` as a value: `PeerConnectionRequest`
+
+`PeerAdvertiserDelegate.allowConnectionRequest(_:requestResponse:)` takes a completion-handler closure, which doesn't translate directly into a "fire and forget" publisher — accepting or rejecting is exactly the kind of side effect Combine publishers shouldn't perform inline. Instead, `connectionRequestPublisher` emits a `PeerConnectionRequest`:
+
+```swift
+public struct PeerConnectionRequest {
+    public let remotePeer: Peer
+    public func accept()
+    public func reject()
+}
+```
+
+Both the delegate callback and the published `PeerConnectionRequest` for a given inbound attempt are backed by the same underlying answer, guarded so only the first call — whichever path gets there first — actually takes effect (see `OneShotResponder` in `PeerAdvertiser.swift`). This means an app can implement `allowConnectionRequest` *or* subscribe to `connectionRequestPublisher` *or* both, without risk of double-answering a request.
+
+### Errors: `PeerConnectError`
+
+`advertiserError`/`browserError` keep their existing `[String: Any]` shape for delegate consumers. `errorPublisher` on both classes instead emits a small `PeerConnectError: Error, Equatable { public let message: String }` — a cleaner value type for the reactive-only surface, built from the same underlying error message at each call site.
+
+---
+
 ## Public API reference
 
 ### `Peer`
@@ -138,6 +193,11 @@ Manages the server side of a connection. One instance covers one service type. M
 ```swift
 public final class PeerAdvertiser: NSObject, @unchecked Sendable {
     public weak var delegate: PeerAdvertiserDelegate?
+
+    // Combine equivalents of the delegate methods below — see "Combine" section above.
+    public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+    public let connectionRequestPublisher: AnyPublisher<PeerConnectionRequest, Never>
+    public let clientConnectedPublisher: AnyPublisher<PeerSession, Never>
 
     /// serviceType: ASCII letters, digits, and hyphens only; max 15 chars. Example: "myapp"
     /// Do NOT use Bonjour format (_xxx._tcp).
@@ -184,9 +244,18 @@ extension PeerAdvertiserDelegate {
 Manages the client side of discovery and connection.
 
 ```swift
-public final class PeerBrowser: NSObject, @unchecked Sendable {
+public final class PeerBrowser: NSObject, ObservableObject, @unchecked Sendable {
     public weak var delegate: PeerBrowserDelegate?
-    public private(set) var nearbyServers: [Peer]   // Currently visible advertising peers
+    @Published public private(set) var nearbyServers: [Peer]   // Currently visible advertising peers
+
+    // Combine equivalents of the delegate methods below — see "Combine" section above.
+    public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+    public let serverFoundPublisher: AnyPublisher<Peer, Never>
+    public let serverLostPublisher: AnyPublisher<Peer, Never>
+    public let unableToConnectPublisher: AnyPublisher<Peer, Never>
+    public let connectionDeniedPublisher: AnyPublisher<Peer, Never>
+    public let connectedPublisher: AnyPublisher<PeerSession, Never>
+    public let duplicateConnectionRejectedPublisher: AnyPublisher<Peer, Never>
 
     /// serviceType must match the advertiser's serviceType exactly.
     /// sessionCoordinator: share one with this device's PeerAdvertiser to prevent parallel
@@ -244,6 +313,14 @@ public final class PeerSession: NSObject, @unchecked Sendable {
     public weak var delegate: PeerSessionDelegate?
     public var delegateQueue: DispatchQueue   // Default: DispatchQueue.main
     public let remotePeer: Peer              // The peer on the other end
+
+    // Combine equivalents of PeerSessionDelegate — see "Combine" section above.
+    // disconnectedPublisher's payload is just byRequest (no redundant session param).
+    public let disconnectedPublisher: AnyPublisher<Bool, Never>
+    public let textReceivedPublisher: AnyPublisher<String, Never>
+    public let dataReceivedPublisher: AnyPublisher<Data, Never>
+    public let startedReceivingResourcePublisher: AnyPublisher<PeerReceivingResourceEvent, Never>
+    public let resourceReceivedPublisher: AnyPublisher<PeerReceivedResourceEvent, Never>
 
     public func sendText(_ text: String)
     public func sendData(_ data: Data)
@@ -490,4 +567,34 @@ advertiser.startPublishing(alsoAvailableViaTCP: true)
 // --- Client, given a known IP address ---
 let target = Peer(name: "My Server", peerID: knownServerPeerID, host: "192.168.1.42", port: 8888)
 browser.connectToServer(target) // same PeerBrowserDelegate/PeerSessionDelegate callbacks as the MC path
+```
+
+### Combine, instead of (or alongside) the delegates
+
+```swift
+var cancellables = Set<AnyCancellable>()
+
+// --- Server ---
+advertiser.connectionRequestPublisher
+    .sink { request in request.accept() } // or request.reject()
+    .store(in: &cancellables)
+
+advertiser.clientConnectedPublisher
+    .sink { session in
+        session.sendText("Hello from server")
+    }
+    .store(in: &cancellables)
+
+// --- Client ---
+browser.$nearbyServers
+    .sink { servers in /* update SwiftUI list, etc. */ }
+    .store(in: &cancellables)
+
+browser.connectedPublisher
+    .sink { session in
+        session.textReceivedPublisher
+            .sink { text in print("Received:", text) }
+            .store(in: &cancellables)
+    }
+    .store(in: &cancellables)
 ```

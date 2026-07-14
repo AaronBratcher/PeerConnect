@@ -1,12 +1,52 @@
 import XCTest
+import Combine
 @testable import PeerConnect
 
 final class PeerBrowserTests: XCTestCase {
+    private var cancellables = Set<AnyCancellable>()
 
     func testInitialNearbyServersIsEmpty() {
         let localPeer = Peer(name: "Client", peerID: UUID().uuidString)
         let browser = PeerBrowser(serviceType: "pctest", clientPeer: localPeer, delegate: nil)
         XCTAssertTrue(browser.nearbyServers.isEmpty)
+    }
+
+    // MARK: - Combine
+
+    func testNearbyServersPublishesInitialEmptyValue() {
+        // foundPeer/lostPeer are MC-framework-driven and aren't unit-tested elsewhere
+        // in this suite either; this confirms $nearbyServers is wired up and usable
+        // as a Combine publisher (e.g. for SwiftUI binding), not the discovery flow itself.
+        let localPeer = Peer(name: "Client", peerID: UUID().uuidString)
+        let browser = PeerBrowser(serviceType: "pctest", clientPeer: localPeer, delegate: nil)
+
+        let expectation = expectation(description: "initial value published")
+        var received: [Peer]?
+        browser.$nearbyServers.sink { servers in
+            received = servers
+            expectation.fulfill()
+        }.store(in: &cancellables)
+
+        wait(for: [expectation], timeout: 1)
+        XCTAssertEqual(received, [])
+    }
+
+    func testConnectToServerWithTCPEndpointFiresUnableToConnectPublisherOnClosedPort() {
+        let localPeer = Peer(name: "Client", peerID: UUID().uuidString)
+        let browser = PeerBrowser(serviceType: "pctest", clientPeer: localPeer, delegate: SpyBrowserDelegate())
+        let server = Peer(name: "Server", peerID: UUID().uuidString, host: "127.0.0.1", port: 1)
+
+        let expectation = expectation(description: "unableToConnectPublisher fired")
+        var publishedPeer: Peer?
+        browser.unableToConnectPublisher.sink { peer in
+            publishedPeer = peer
+            expectation.fulfill()
+        }.store(in: &cancellables)
+
+        browser.connectToServer(server)
+
+        wait(for: [expectation], timeout: 5)
+        XCTAssertEqual(publishedPeer?.peerID, server.peerID)
     }
 
     func testDelegateCanBeAssignedAndIsWeak() {

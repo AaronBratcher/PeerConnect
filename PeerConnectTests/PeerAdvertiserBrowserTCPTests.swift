@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import PeerConnect
 
 // End-to-end loopback (127.0.0.1) tests of the full TCP/TLS path: PeerAdvertiser
@@ -6,6 +7,7 @@ import XCTest
 // PeerSession's public sendText/sendData/sendResourceAtURL/disconnect API —
 // exercised over the new transport exactly as a consuming app would use it.
 final class PeerAdvertiserBrowserTCPTests: XCTestCase {
+    private var cancellables = Set<AnyCancellable>()
 
     private func waitForListenerToBind() {
         let ready = expectation(description: "listener bound")
@@ -34,14 +36,38 @@ final class PeerAdvertiserBrowserTCPTests: XCTestCase {
         let clientDidConnect = expectation(description: "server accepted client")
         advertiserDelegate.onClientDidConnect = { clientDidConnect.fulfill() }
 
+        let connectionRequestPublished = expectation(description: "connectionRequestPublisher fired")
+        var publishedRequest: PeerConnectionRequest?
+        advertiser.connectionRequestPublisher.sink { request in
+            publishedRequest = request
+            connectionRequestPublished.fulfill()
+        }.store(in: &cancellables)
+
+        let clientConnectedPublished = expectation(description: "clientConnectedPublisher fired")
+        var advertiserPublishedSession: PeerSession?
+        advertiser.clientConnectedPublisher.sink { session in
+            advertiserPublishedSession = session
+            clientConnectedPublished.fulfill()
+        }.store(in: &cancellables)
+
+        let connectedPublished = expectation(description: "browser connectedPublisher fired")
+        var browserPublishedSession: PeerSession?
+        browser.connectedPublisher.sink { session in
+            browserPublishedSession = session
+            connectedPublished.fulfill()
+        }.store(in: &cancellables)
+
         browser.connectToServer(targetPeer)
-        wait(for: [connected, clientDidConnect], timeout: 5)
+        wait(for: [connected, clientDidConnect, connectionRequestPublished, clientConnectedPublished, connectedPublished], timeout: 5)
 
         guard let clientSession = browserDelegate.session, let serverSession = advertiserDelegate.session else {
             return XCTFail("Expected sessions on both sides")
         }
         XCTAssertEqual(serverSession.remotePeer.peerID, clientPeer.peerID)
         XCTAssertEqual(clientSession.remotePeer.peerID, serverPeer.peerID)
+        XCTAssertEqual(publishedRequest?.remotePeer.peerID, clientPeer.peerID)
+        XCTAssertTrue(advertiserPublishedSession === serverSession)
+        XCTAssertTrue(browserPublishedSession === clientSession)
 
         let serverSessionDelegate = RecordingSessionDelegate()
         serverSession.delegate = serverSessionDelegate

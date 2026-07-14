@@ -1,8 +1,10 @@
 import XCTest
 import MultipeerConnectivity
+import Combine
 @testable import PeerConnect
 
 final class PeerSessionTests: XCTestCase {
+    private var cancellables = Set<AnyCancellable>()
 
     private func makeSession(localName: String = "Local", remoteName: String = "Remote") -> (PeerSession, MCSession, MCPeerID) {
         let localPeerID = MCPeerID(displayName: localName)
@@ -124,14 +126,22 @@ final class PeerSessionTests: XCTestCase {
         let spy = SpySessionDelegate()
         session.delegate = spy
 
-        let expectation = expectation(description: "text received")
-        spy.onTextReceived = { expectation.fulfill() }
+        let delegateExpectation = expectation(description: "text received")
+        spy.onTextReceived = { delegateExpectation.fulfill() }
+
+        let publisherExpectation = expectation(description: "textReceivedPublisher fired")
+        var publishedText: String?
+        session.textReceivedPublisher.sink { text in
+            publishedText = text
+            publisherExpectation.fulfill()
+        }.store(in: &cancellables)
 
         let encoded = try JSONEncoder().encode(PeerMessage.text("hi there"))
         (session as PeerTransportDelegate).transportDidReceive(encoded)
 
-        wait(for: [expectation], timeout: 1)
+        wait(for: [delegateExpectation, publisherExpectation], timeout: 1)
         XCTAssertEqual(spy.lastText, "hi there")
+        XCTAssertEqual(publishedText, "hi there")
     }
 
     func testTransportDidReceiveDispatchesDataToDelegate() throws {
@@ -139,15 +149,23 @@ final class PeerSessionTests: XCTestCase {
         let spy = SpySessionDelegate()
         session.delegate = spy
 
-        let expectation = expectation(description: "data received")
-        spy.onDataReceived = { expectation.fulfill() }
+        let delegateExpectation = expectation(description: "data received")
+        spy.onDataReceived = { delegateExpectation.fulfill() }
+
+        let publisherExpectation = expectation(description: "dataReceivedPublisher fired")
+        var publishedData: Data?
+        session.dataReceivedPublisher.sink { data in
+            publishedData = data
+            publisherExpectation.fulfill()
+        }.store(in: &cancellables)
 
         let payload = Data([9, 9, 9])
         let encoded = try JSONEncoder().encode(PeerMessage.data(payload))
         (session as PeerTransportDelegate).transportDidReceive(encoded)
 
-        wait(for: [expectation], timeout: 1)
+        wait(for: [delegateExpectation, publisherExpectation], timeout: 1)
         XCTAssertEqual(spy.lastData, payload)
+        XCTAssertEqual(publishedData, payload)
     }
 
     func testTransportDidDisconnectForwardsByRequestToDelegate() {
@@ -155,14 +173,22 @@ final class PeerSessionTests: XCTestCase {
         let spy = SpySessionDelegate()
         session.delegate = spy
 
-        let expectation = expectation(description: "disconnected")
-        spy.onDisconnected = { expectation.fulfill() }
+        let delegateExpectation = expectation(description: "disconnected")
+        spy.onDisconnected = { delegateExpectation.fulfill() }
+
+        let publisherExpectation = expectation(description: "disconnectedPublisher fired")
+        var publishedByRequest: Bool?
+        session.disconnectedPublisher.sink { byRequest in
+            publishedByRequest = byRequest
+            publisherExpectation.fulfill()
+        }.store(in: &cancellables)
 
         (session as PeerTransportDelegate).transportDidDisconnect(byRequest: true)
 
-        wait(for: [expectation], timeout: 1)
+        wait(for: [delegateExpectation, publisherExpectation], timeout: 1)
         XCTAssertTrue(spy.didDisconnect)
         XCTAssertEqual(spy.lastByRequest, true)
+        XCTAssertEqual(publishedByRequest, true)
     }
 
     func testResourceReceiveMovesFileIntoDocumentsAndNotifiesDelegate() throws {
@@ -176,24 +202,45 @@ final class PeerSessionTests: XCTestCase {
 
         let startExpectation = expectation(description: "started receiving")
         spy.onStartedReceivingResource = { startExpectation.fulfill() }
+        let startPublisherExpectation = expectation(description: "startedReceivingResourcePublisher fired")
+        var startedEvent: PeerReceivingResourceEvent?
+        session.startedReceivingResourcePublisher.sink { event in
+            startedEvent = event
+            startPublisherExpectation.fulfill()
+        }.store(in: &cancellables)
+
         (session as PeerTransportDelegate).transport(didStartReceivingResourceNamed: resourceName, progress: progress)
-        wait(for: [startExpectation], timeout: 1)
+        wait(for: [startExpectation, startPublisherExpectation], timeout: 1)
 
         guard let destination = spy.lastResourceURL else {
             return XCTFail("Expected startedReceivingResource to report a destination URL")
         }
         defer { try? FileManager.default.removeItem(at: destination) }
 
+        XCTAssertEqual(startedEvent?.atURL, destination)
+        XCTAssertEqual(startedEvent?.name, fileName)
+        XCTAssertEqual(startedEvent?.resourceID, "res-2")
+
         let stagingURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try Data("test".utf8).write(to: stagingURL)
 
         let finishExpectation = expectation(description: "finished receiving")
         spy.onResourceReceived = { finishExpectation.fulfill() }
+        let finishPublisherExpectation = expectation(description: "resourceReceivedPublisher fired")
+        var finishedEvent: PeerReceivedResourceEvent?
+        session.resourceReceivedPublisher.sink { event in
+            finishedEvent = event
+            finishPublisherExpectation.fulfill()
+        }.store(in: &cancellables)
+
         (session as PeerTransportDelegate).transport(didFinishReceivingResourceNamed: resourceName, at: stagingURL, error: nil)
-        wait(for: [finishExpectation], timeout: 1)
+        wait(for: [finishExpectation, finishPublisherExpectation], timeout: 1)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "test")
+        XCTAssertEqual(finishedEvent?.atURL, destination)
+        XCTAssertEqual(finishedEvent?.name, fileName)
+        XCTAssertEqual(finishedEvent?.resourceID, "res-2")
     }
 }
 

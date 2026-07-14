@@ -1,10 +1,27 @@
 import Foundation
 import MultipeerConnectivity
 import Network
+import Combine
 
-public final class PeerBrowser: NSObject, @unchecked Sendable {
+public final class PeerBrowser: NSObject, ObservableObject, @unchecked Sendable {
     public weak var delegate: PeerBrowserDelegate?
-    public private(set) var nearbyServers: [Peer] = []
+    @Published public private(set) var nearbyServers: [Peer] = []
+
+    private let errorSubject = PassthroughSubject<PeerConnectError, Never>()
+    private let serverFoundSubject = PassthroughSubject<Peer, Never>()
+    private let serverLostSubject = PassthroughSubject<Peer, Never>()
+    private let unableToConnectSubject = PassthroughSubject<Peer, Never>()
+    private let connectionDeniedSubject = PassthroughSubject<Peer, Never>()
+    private let connectedSubject = PassthroughSubject<PeerSession, Never>()
+    private let duplicateConnectionRejectedSubject = PassthroughSubject<Peer, Never>()
+
+    public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+    public let serverFoundPublisher: AnyPublisher<Peer, Never>
+    public let serverLostPublisher: AnyPublisher<Peer, Never>
+    public let unableToConnectPublisher: AnyPublisher<Peer, Never>
+    public let connectionDeniedPublisher: AnyPublisher<Peer, Never>
+    public let connectedPublisher: AnyPublisher<PeerSession, Never>
+    public let duplicateConnectionRejectedPublisher: AnyPublisher<Peer, Never>
 
     private let serviceType: String
     private let localPeer: Peer
@@ -42,6 +59,13 @@ public final class PeerBrowser: NSObject, @unchecked Sendable {
         self.localMCPeerID = MCPeerID(displayName: clientPeer.name)
         self.sessionCoordinator = sessionCoordinator ?? PeerSessionCoordinator(localPeerID: clientPeer.peerID)
         self.delegate = delegate
+        self.errorPublisher = errorSubject.eraseToAnyPublisher()
+        self.serverFoundPublisher = serverFoundSubject.eraseToAnyPublisher()
+        self.serverLostPublisher = serverLostSubject.eraseToAnyPublisher()
+        self.unableToConnectPublisher = unableToConnectSubject.eraseToAnyPublisher()
+        self.connectionDeniedPublisher = connectionDeniedSubject.eraseToAnyPublisher()
+        self.connectedPublisher = connectedSubject.eraseToAnyPublisher()
+        self.duplicateConnectionRejectedPublisher = duplicateConnectionRejectedSubject.eraseToAnyPublisher()
     }
 
     // MARK: - Public API
@@ -68,6 +92,7 @@ public final class PeerBrowser: NSObject, @unchecked Sendable {
 
             guard let coordinatorToken = sessionCoordinator.beginOutbound(to: server.peerID, cancel: { session.disconnect() }) else {
                 delegate?.duplicateConnectionRejected(server)
+                duplicateConnectionRejectedSubject.send(server)
                 return
             }
 
@@ -104,6 +129,7 @@ extension PeerBrowser: MCNearbyServiceBrowserDelegate {
         lock.unlock()
 
         delegate?.serverFound(peer)
+        serverFoundSubject.send(peer)
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
@@ -115,11 +141,13 @@ extension PeerBrowser: MCNearbyServiceBrowserDelegate {
         lock.unlock()
         if let lost {
             delegate?.serverLost(lost)
+            serverLostSubject.send(lost)
         }
     }
 
     public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         delegate?.browserError(["error": error.localizedDescription])
+        errorSubject.send(PeerConnectError(message: error.localizedDescription))
     }
 }
 
@@ -134,6 +162,7 @@ extension PeerBrowser: MCSessionDelegate {
         guard let entry else { return }
         sessionCoordinator.markEnded(entry.peer.peerID, token: entry.coordinatorToken)
         delegate?.unableToConnect(entry.peer)
+        unableToConnectSubject.send(entry.peer)
     }
 
     public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
@@ -157,10 +186,12 @@ extension PeerBrowser: MCSessionDelegate {
                 self?.sessionCoordinator.markEnded(entry.peer.peerID, token: entry.coordinatorToken)
             })
             delegate?.connected(peerSession)
+            connectedSubject.send(peerSession)
         } else {
             session.disconnect()
             sessionCoordinator.markEnded(entry.peer.peerID, token: entry.coordinatorToken)
             delegate?.connectionDenied(entry.peer)
+            connectionDeniedSubject.send(entry.peer)
         }
     }
 
@@ -175,6 +206,7 @@ extension PeerBrowser {
     private func connectViaTCP(_ server: Peer, host: String, port: UInt16) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             delegate?.unableToConnect(server)
+            unableToConnectSubject.send(server)
             return
         }
 
@@ -183,6 +215,7 @@ extension PeerBrowser {
 
         guard let coordinatorToken = sessionCoordinator.beginOutbound(to: server.peerID, cancel: { connection.cancel() }) else {
             delegate?.duplicateConnectionRejected(server)
+            duplicateConnectionRejectedSubject.send(server)
             return
         }
 
@@ -209,6 +242,7 @@ extension PeerBrowser {
                     connection.cancel()
                     self.sessionCoordinator.markEnded(server.peerID, token: entry.coordinatorToken)
                     self.delegate?.unableToConnect(server)
+                    self.unableToConnectSubject.send(server)
                 }
             case .cancelled:
                 self.lock.lock()
@@ -217,6 +251,7 @@ extension PeerBrowser {
                 if let entry {
                     self.sessionCoordinator.markEnded(server.peerID, token: entry.coordinatorToken)
                     self.delegate?.unableToConnect(server)
+                    self.unableToConnectSubject.send(server)
                 }
             default:
                 break
@@ -254,6 +289,7 @@ extension PeerBrowser {
                 connection.cancel()
                 self.sessionCoordinator.markEnded(server.peerID, token: entry.coordinatorToken)
                 self.delegate?.unableToConnect(server)
+                self.unableToConnectSubject.send(server)
                 return
             }
 
@@ -264,10 +300,12 @@ extension PeerBrowser {
                     self?.sessionCoordinator.markEnded(server.peerID, token: entry.coordinatorToken)
                 })
                 self.delegate?.connected(peerSession)
+                self.connectedSubject.send(peerSession)
             } else {
                 connection.cancel()
                 self.sessionCoordinator.markEnded(server.peerID, token: entry.coordinatorToken)
                 self.delegate?.connectionDenied(server)
+                self.connectionDeniedSubject.send(server)
             }
         }
     }

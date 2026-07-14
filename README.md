@@ -1,12 +1,16 @@
 # PeerConnect
 
-A Swift package that wraps Apple's `MultipeerConnectivity` framework behind a simpler, role-based API. It handles the session lifecycle, handshakes, delegate ownership transfers, and thread safety for you — you just work with `Peer`, `PeerSession`, and three small delegate protocols.
+A Swift package that wraps Apple's `MultipeerConnectivity` (MC) framework behind a simpler, role-based API. It handles the session lifecycle, handshakes, delegate ownership transfers, and thread safety for you — you just work with `Peer`, `PeerSession`, and three small delegate protocols.
 
 A second transport is also available: a direct TCP connection wrapped in TLS, for connecting to a known IP address instead of discovering peers over Bonjour. Both transports share the same API — see [Connecting over TCP/TLS instead](#connecting-over-tcptls-instead-of-mc-discovery) below.
 
+Every event is also available as a Combine publisher alongside its delegate method — see [Combine support](#combine-support) below.
+
 **Supported platforms:** iOS 26+, macOS 26+, tvOS 26+, watchOS 26+, visionOS 26+
 
-For a deep dive into internals (connection lifecycle, wire format, thread-safety model), see [ARCHITECTURE.md](Sources/PeerConnect/ARCHITECTURE.md).
+For a deep dive into internals (connection lifecycle, wire format, thread-safety model), see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+This library replaces the ALBPeerConnect library while maintaining it's public APIs.
 
 ---
 
@@ -172,6 +176,46 @@ session.disconnect()
 
 ---
 
+## Combine support
+
+Every delegate method above has a matching, discrete Combine publisher — `PeerAdvertiser`/`PeerBrowser`/`PeerSession` each expose one publisher per event, named `<event>Publisher`. Use them instead of, or alongside, the delegates; a publisher fires at exactly the same point as its delegate counterpart.
+
+```swift
+import Combine
+var cancellables = Set<AnyCancellable>()
+
+// --- Server ---
+advertiser.connectionRequestPublisher
+    .sink { request in request.accept() }   // or request.reject()
+    .store(in: &cancellables)
+
+advertiser.clientConnectedPublisher
+    .sink { session in session.sendText("Hello from server") }
+    .store(in: &cancellables)
+
+// --- Client ---
+browser.$nearbyServers          // PeerBrowser is an ObservableObject
+    .sink { servers in /* update a SwiftUI list, etc. */ }
+    .store(in: &cancellables)
+
+browser.connectedPublisher
+    .sink { session in
+        session.textReceivedPublisher
+            .sink { text in print("Received:", text) }
+            .store(in: &cancellables)
+    }
+    .store(in: &cancellables)
+```
+
+Two spots don't map 1:1 onto the delegate signatures:
+
+- **`allowConnectionRequest`** doesn't have a "fire and forget" publisher form, since accepting/rejecting is a decision, not just an event. `connectionRequestPublisher` instead emits a `PeerConnectionRequest` (`remotePeer` + `accept()`/`reject()`). If you implement both the delegate method and subscribe to the publisher for the same request, only the first call to *either* path (the delegate's `requestResponse` or the published request's `accept()`/`reject()`) actually takes effect — the other is a no-op, so there's no risk of double-answering.
+- **Errors** (`advertiserError`/`browserError`) keep their `[String: Any]` shape on the delegate; `errorPublisher` on both classes instead emits a small `PeerConnectError { public let message: String }` value.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#combine) for the full list of publishers per class.
+
+---
+
 ## Connecting over TCP/TLS instead of MC discovery
 
 If you'd rather connect to a specific IP address than discover peers over Bonjour, enable the TCP/TLS transport. Everything else — `PeerSession`, its delegate, `sendText`/`sendData`/`sendResourceAtURL`/`disconnect` — works exactly the same either way.
@@ -206,7 +250,7 @@ let advertiser = PeerAdvertiser(serviceType: "myapp", serverPeer: myPeer, sessio
 let browser = PeerBrowser(serviceType: "myapp", clientPeer: myPeer, sessionCoordinator: coordinator, delegate: self)
 ```
 
-With a shared coordinator, a redundant or race-losing connection attempt is refused automatically — `allowConnectionRequest`/dialing never happens for it — and your delegate optionally learns why via `duplicateConnectionRejected(_:)` (default no-op if you don't implement it). If you don't share a coordinator, each of `PeerAdvertiser`/`PeerBrowser` still gets its own private one, which refuses a plain duplicate attempt at an already-connected peer on its own, just without resolving a race against your other role. See [ARCHITECTURE.md](Sources/PeerConnect/ARCHITECTURE.md#preventing-parallelduplicate-sessions) for how the tie-break works.
+With a shared coordinator, a redundant or race-losing connection attempt is refused automatically — `allowConnectionRequest`/dialing never happens for it — and your delegate optionally learns why via `duplicateConnectionRejected(_:)` (default no-op if you don't implement it; also available as `duplicateConnectionRejectedPublisher` on `PeerBrowser`). If you don't share a coordinator, each of `PeerAdvertiser`/`PeerBrowser` still gets its own private one, which refuses a plain duplicate attempt at an already-connected peer on its own, just without resolving a race against your other role. See [ARCHITECTURE.md](ARCHITECTURE.md#preventing-parallelduplicate-sessions) for how the tie-break works.
 
 ---
 
@@ -219,6 +263,7 @@ With a shared coordinator, a redundant or race-losing connection attempt is refu
 - **Received files** land in your app's Documents directory automatically; if a name collision occurs, a numeric suffix (`-1`, `-2`, …) is appended.
 - **Delegates are weakly held** (`weak var delegate`) — keep a strong reference to your `PeerAdvertiser`/`PeerBrowser`/`PeerSession` delegate elsewhere (e.g. a view controller or observable object) or callbacks will silently stop firing.
 - **Running an advertiser and browser together?** Share a `PeerSessionCoordinator` between them (see [Running both roles at once](#running-both-roles-at-once)) or you may end up with two parallel sessions to the same peer.
+- **Combine publishers fire on the same thread as their delegate counterpart** — no additional dispatch is introduced, so the same "may arrive on a background thread" caveat above applies to `PeerAdvertiser`/`PeerBrowser`'s publishers too; `PeerSession`'s publishers follow `delegateQueue` like its delegate does.
 
 ---
 

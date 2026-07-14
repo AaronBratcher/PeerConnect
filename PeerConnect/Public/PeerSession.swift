@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // Resource name encoding: "<resourceID>\u{001C}<filename>"
 // Unit separator (U+001C) cannot appear in UUIDs or typical filenames.
@@ -17,6 +18,20 @@ public final class PeerSession: NSObject, @unchecked Sendable {
     // Tracks planned destination URLs for in-progress inbound resource transfers.
     private var resourceDestinations: [String: URL] = [:]
 
+    private let disconnectedSubject = PassthroughSubject<Bool, Never>()
+    private let textReceivedSubject = PassthroughSubject<String, Never>()
+    private let dataReceivedSubject = PassthroughSubject<Data, Never>()
+    private let startedReceivingResourceSubject = PassthroughSubject<PeerReceivingResourceEvent, Never>()
+    private let resourceReceivedSubject = PassthroughSubject<PeerReceivedResourceEvent, Never>()
+
+    /// Fires with `byRequest` when the connection ends. Unlike `PeerSessionDelegate`,
+    /// there's no redundant `session` parameter — a subscriber already holds this instance.
+    public let disconnectedPublisher: AnyPublisher<Bool, Never>
+    public let textReceivedPublisher: AnyPublisher<String, Never>
+    public let dataReceivedPublisher: AnyPublisher<Data, Never>
+    public let startedReceivingResourcePublisher: AnyPublisher<PeerReceivingResourceEvent, Never>
+    public let resourceReceivedPublisher: AnyPublisher<PeerReceivedResourceEvent, Never>
+
     /// - Parameter onEnded: Invoked once when the transport reports a disconnect,
     ///   before the app delegate is notified. Used internally by PeerAdvertiser/PeerBrowser
     ///   to release this peer's slot in a `PeerSessionCoordinator`.
@@ -24,6 +39,11 @@ public final class PeerSession: NSObject, @unchecked Sendable {
         self.transport = transport
         self.remotePeer = remotePeer
         self.onEnded = onEnded
+        self.disconnectedPublisher = disconnectedSubject.eraseToAnyPublisher()
+        self.textReceivedPublisher = textReceivedSubject.eraseToAnyPublisher()
+        self.dataReceivedPublisher = dataReceivedSubject.eraseToAnyPublisher()
+        self.startedReceivingResourcePublisher = startedReceivingResourceSubject.eraseToAnyPublisher()
+        self.resourceReceivedPublisher = resourceReceivedSubject.eraseToAnyPublisher()
         super.init()
         transport.transportDelegate = self
     }
@@ -61,11 +81,13 @@ extension PeerSession: PeerTransportDelegate {
             delegateQueue.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.textReceived(self, text: text)
+                self.textReceivedSubject.send(text)
             }
         case .data(let payload):
             delegateQueue.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.dataReceived(self, data: payload)
+                self.dataReceivedSubject.send(payload)
             }
         case .handshake, .resourceStart, .resourceChunk, .resourceEnd:
             // Handshake is consumed before PeerSession is installed as delegate;
@@ -80,6 +102,7 @@ extension PeerSession: PeerTransportDelegate {
         delegateQueue.async { [weak self] in
             guard let self else { return }
             self.delegate?.disconnected(self, byRequest: byRequest)
+            self.disconnectedSubject.send(byRequest)
         }
     }
 
@@ -94,6 +117,9 @@ extension PeerSession: PeerTransportDelegate {
         delegateQueue.async { [weak self] in
             guard let self else { return }
             self.delegate?.startedReceivingResource(self, atURL: destination, name: name, resourceID: resourceID, progress: progress)
+            self.startedReceivingResourceSubject.send(
+                PeerReceivingResourceEvent(atURL: destination, name: name, resourceID: resourceID, progress: progress)
+            )
         }
     }
 
@@ -110,6 +136,9 @@ extension PeerSession: PeerTransportDelegate {
         delegateQueue.async { [weak self] in
             guard let self else { return }
             self.delegate?.resourceReceived(self, atURL: destination, name: name, resourceID: resourceID)
+            self.resourceReceivedSubject.send(
+                PeerReceivedResourceEvent(atURL: destination, name: name, resourceID: resourceID)
+            )
         }
     }
 }

@@ -1,9 +1,18 @@
 import Foundation
 import MultipeerConnectivity
 import Network
+import Combine
 
 public final class PeerAdvertiser: NSObject, @unchecked Sendable {
     public weak var delegate: PeerAdvertiserDelegate?
+
+    private let errorSubject = PassthroughSubject<PeerConnectError, Never>()
+    private let connectionRequestSubject = PassthroughSubject<PeerConnectionRequest, Never>()
+    private let clientConnectedSubject = PassthroughSubject<PeerSession, Never>()
+
+    public let errorPublisher: AnyPublisher<PeerConnectError, Never>
+    public let connectionRequestPublisher: AnyPublisher<PeerConnectionRequest, Never>
+    public let clientConnectedPublisher: AnyPublisher<PeerSession, Never>
 
     private let serviceType: String
     private let localPeer: Peer
@@ -49,6 +58,9 @@ public final class PeerAdvertiser: NSObject, @unchecked Sendable {
         self.tcpPort = tcpPort
         self.sessionCoordinator = sessionCoordinator ?? PeerSessionCoordinator(localPeerID: serverPeer.peerID)
         self.delegate = delegate
+        self.errorPublisher = errorSubject.eraseToAnyPublisher()
+        self.connectionRequestPublisher = connectionRequestSubject.eraseToAnyPublisher()
+        self.clientConnectedPublisher = clientConnectedSubject.eraseToAnyPublisher()
     }
 
     // MARK: - Public API
@@ -101,7 +113,7 @@ extension PeerAdvertiser: MCNearbyServiceAdvertiserDelegate {
         pendingConnections[peerID] = entry
         lock.unlock()
 
-        delegate?.allowConnectionRequest(remotePeer) { [weak self] allow in
+        let responder = OneShotResponder { [weak self] allow in
             guard let self else { return }
 
             if allow {
@@ -116,10 +128,13 @@ extension PeerAdvertiser: MCNearbyServiceAdvertiserDelegate {
                 self.lock.unlock()
             }
         }
+        delegate?.allowConnectionRequest(remotePeer, requestResponse: responder.respond)
+        connectionRequestSubject.send(PeerConnectionRequest(remotePeer: remotePeer, respond: responder.respond))
     }
 
     public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
         delegate?.advertiserError(["error": error.localizedDescription])
+        errorSubject.send(PeerConnectError(message: error.localizedDescription))
     }
 }
 
@@ -148,6 +163,7 @@ extension PeerAdvertiser: MCSessionDelegate {
                 self?.sessionCoordinator.markEnded(entry.peer.peerID, token: entry.coordinatorToken)
             })
             delegate?.clientDidConnect(peerSession)
+            clientConnectedSubject.send(peerSession)
 
         case .notConnected:
             lock.lock()
@@ -178,7 +194,9 @@ extension PeerAdvertiser {
 
     private func startTCPListener() {
         guard let port = NWEndpoint.Port(rawValue: tcpPort) else {
-            delegate?.advertiserError(["error": "Invalid tcpPort \(tcpPort)"])
+            let message = "Invalid tcpPort \(tcpPort)"
+            delegate?.advertiserError(["error": message])
+            errorSubject.send(PeerConnectError(message: message))
             return
         }
 
@@ -192,12 +210,14 @@ extension PeerAdvertiser {
             listener.stateUpdateHandler = { [weak self] state in
                 if case .failed(let error) = state {
                     self?.delegate?.advertiserError(["error": error.localizedDescription])
+                    self?.errorSubject.send(PeerConnectError(message: error.localizedDescription))
                 }
             }
             listener.start(queue: tcpQueue)
             tcpListener = listener
         } catch {
             delegate?.advertiserError(["error": error.localizedDescription])
+            errorSubject.send(PeerConnectError(message: error.localizedDescription))
         }
     }
 
@@ -245,7 +265,7 @@ extension PeerAdvertiser {
             self.pendingTCPConnections[key] = PendingTCPEntry(connection: connection, peer: remotePeer, coordinatorToken: coordinatorToken)
             self.lock.unlock()
 
-            self.delegate?.allowConnectionRequest(remotePeer) { [weak self] allow in
+            let responder = OneShotResponder { [weak self] allow in
                 guard let self else { return }
 
                 self.lock.lock()
@@ -272,8 +292,32 @@ extension PeerAdvertiser {
                         coordinator?.markEnded(entry.peer.peerID, token: entry.coordinatorToken)
                     })
                     self.delegate?.clientDidConnect(peerSession)
+                    self.clientConnectedSubject.send(peerSession)
                 }
             }
+            self.delegate?.allowConnectionRequest(remotePeer, requestResponse: responder.respond)
+            self.connectionRequestSubject.send(PeerConnectionRequest(remotePeer: remotePeer, respond: responder.respond))
         }
+    }
+}
+
+private final class OneShotResponder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answered = false
+    private let handler: (Bool) -> Void
+
+    init(handler: @escaping (Bool) -> Void) {
+        self.handler = handler
+    }
+
+    func respond(_ allow: Bool) {
+        lock.lock()
+        guard !answered else {
+            lock.unlock()
+            return
+        }
+        answered = true
+        lock.unlock()
+        handler(allow)
     }
 }

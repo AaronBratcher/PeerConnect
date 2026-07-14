@@ -1,7 +1,9 @@
 import XCTest
+import Combine
 @testable import PeerConnect
 
 final class PeerAdvertiserTests: XCTestCase {
+    private var cancellables = Set<AnyCancellable>()
 
     func testDelegateCanBeAssignedAndIsWeak() {
         let localPeer = Peer(name: "Server", peerID: UUID().uuidString)
@@ -53,6 +55,24 @@ final class PeerAdvertiserTests: XCTestCase {
         advertiser.stopPublishing()
         advertiser.startPublishing(alsoAvailableViaTCP: true)
         advertiser.stopPublishing()
+    }
+
+    // MARK: - Combine
+
+    func testInvalidTCPPortFiresErrorPublisherAndDelegate() {
+        let localPeer = Peer(name: "Server", peerID: UUID().uuidString)
+        let spy = SpyAdvertiserDelegate()
+        let advertiser = PeerAdvertiser(serviceType: "pctest", serverPeer: localPeer, tcpPort: 0, delegate: spy)
+
+        var publishedError: PeerConnectError?
+        advertiser.errorPublisher.sink { error in
+            publishedError = error
+        }.store(in: &cancellables)
+
+        advertiser.startPublishing(alsoAvailableViaTCP: true)
+
+        XCTAssertEqual(spy.errors.count, 1)
+        XCTAssertNotNil(publishedError)
     }
 }
 
