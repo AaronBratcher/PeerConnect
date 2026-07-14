@@ -92,12 +92,17 @@ enum PeerTLSIdentity {
             throw PeerTLSIdentityError.certificateImportFailed(certAddStatus)
         }
 
-        var identity: SecIdentity?
-        let identityStatus = SecIdentityCreateWithCertificate(nil, secCertificate, &identity)
-        guard identityStatus == errSecSuccess, let identity else {
+        let identityQuery: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecReturnRef as String: true,
+            kSecMatchItemList as String: [secCertificate] as CFArray
+        ]
+        var identityRef: CFTypeRef?
+        let identityStatus = SecItemCopyMatching(identityQuery as CFDictionary, &identityRef)
+        guard identityStatus == errSecSuccess, let identityRef else {
             throw PeerTLSIdentityError.identityLookupFailed(identityStatus)
         }
-        return identity
+        return identityRef as! SecIdentity
     }
 
     /// TLS options for the advertiser (server) side: presents `identity` during the handshake.
