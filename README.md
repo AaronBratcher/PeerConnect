@@ -1,6 +1,6 @@
 # PeerConnect
 
-A Swift package that wraps Apple's `MultipeerConnectivity` framework behind a simpler, role-based API. It handles the session lifecycle, handshakes, delegate ownership transfers, and thread safety for you — you just work with `Peer`, `PeerSession`, and three small delegate protocols.
+A Swift package that provides a simple, role-based API. It handles the session lifecycle, handshakes, delegate ownership transfers, and thread safety for you — you just work with `Peer`, `PeerSession`, and three small delegate protocols.
 
 A second transport is also available: a direct TCP connection wrapped in TLS, for connecting to a known IP address instead of discovering peers over Bonjour. Both transports share the same API — see [Connecting over TCP/TLS instead](#connecting-over-tcptls-instead-of-mc-discovery) below.
 
