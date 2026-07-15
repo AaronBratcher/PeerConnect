@@ -5,10 +5,8 @@ import Security
 import Network
 
 enum PeerTLSIdentityError: Error {
-    case keyImportFailed(OSStatus)
     case secKeyCreationFailed(String)
-    case certificateImportFailed(OSStatus)
-    case identityLookupFailed(OSStatus)
+    case identityCreationFailed
 }
 
 // Generates an ephemeral, self-signed TLS identity for the TCP transport, and
@@ -18,10 +16,10 @@ enum PeerTLSIdentityError: Error {
 // PeerAdvertiserDelegate.allowConnectionRequest — the certificate is not a
 // trust boundary, the same way MCSession's own encryption isn't one either.
 enum PeerTLSIdentity {
-    /// Builds a fresh P-256 self-signed identity, valid for 24 hours, and
-    /// imports it into the keychain (required for `Network` to reference it
-    /// by `sec_identity_t`). Not persisted beyond the keychain item's
-    /// lifetime; callers should treat this as a per-process/per-instance identity.
+    /// Builds a fresh P-256 self-signed identity, valid for 24 hours. Assembled entirely
+    /// in-memory via `SecIdentityCreate` - no keychain storage or lookup involved, so this
+    /// doesn't need keychain access (which a bare `swift test` process running outside
+    /// Xcode/CI signing doesn't reliably have). Per-process/per-instance; never persisted.
     static func makeEphemeralIdentity(commonName: String) throws -> SecIdentity {
         let privateKey = P256.Signing.PrivateKey()
 
@@ -65,44 +63,10 @@ enum PeerTLSIdentity {
             throw PeerTLSIdentityError.secKeyCreationFailed(message)
         }
 
-        // Keychain label unique to this identity so repeated calls (e.g. one
-        // per PeerAdvertiser instance, or across test runs) don't collide.
-        let label = "com.peerconnect.tcp-identity.\(UUID().uuidString)"
-
-        let keyAddAttributes: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecValueRef as String: secKey,
-            kSecAttrLabel as String: label,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-        SecItemDelete(keyAddAttributes as CFDictionary)
-        let keyAddStatus = SecItemAdd(keyAddAttributes as CFDictionary, nil)
-        guard keyAddStatus == errSecSuccess else {
-            throw PeerTLSIdentityError.keyImportFailed(keyAddStatus)
+        guard let identity = SecIdentityCreate(nil, secCertificate, secKey) else {
+            throw PeerTLSIdentityError.identityCreationFailed
         }
-
-        let certAddAttributes: [String: Any] = [
-            kSecClass as String: kSecClassCertificate,
-            kSecValueRef as String: secCertificate,
-            kSecAttrLabel as String: label
-        ]
-        SecItemDelete(certAddAttributes as CFDictionary)
-        let certAddStatus = SecItemAdd(certAddAttributes as CFDictionary, nil)
-        guard certAddStatus == errSecSuccess else {
-            throw PeerTLSIdentityError.certificateImportFailed(certAddStatus)
-        }
-
-        let identityQuery: [String: Any] = [
-            kSecClass as String: kSecClassIdentity,
-            kSecReturnRef as String: true,
-            kSecMatchItemList as String: [secCertificate] as CFArray
-        ]
-        var identityRef: CFTypeRef?
-        let identityStatus = SecItemCopyMatching(identityQuery as CFDictionary, &identityRef)
-        guard identityStatus == errSecSuccess, let identityRef else {
-            throw PeerTLSIdentityError.identityLookupFailed(identityStatus)
-        }
-        return identityRef as! SecIdentity
+        return identity
     }
 
     /// TLS options for the advertiser (server) side: presents `identity` during the handshake.
