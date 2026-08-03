@@ -53,11 +53,11 @@ public final class PeerBrowser: NSObject, ObservableObject, @unchecked Sendable 
     /// - Parameters:
     ///   - serviceType: A short MultipeerConnectivity service identifier — ASCII letters, numbers, and hyphens only, max 15 chars. Example: `"myappname"`. Do NOT use Bonjour format (`_xxx._tcp`).
     ///   - sessionCoordinator: Share one instance with this device's `PeerAdvertiser` to prevent parallel sessions with a peer that's also advertising and browsing (see `PeerSessionCoordinator`). Defaults to a private instance, which still refuses a redundant duplicate attempt to an already-connected peer on its own.
-    public init(serviceType: String, clientPeer: Peer, sessionCoordinator: PeerSessionCoordinator? = nil, delegate: PeerBrowserDelegate?) {
+    public init(serviceType: String, localPeer: Peer, sessionCoordinator: PeerSessionCoordinator? = nil, delegate: PeerBrowserDelegate?) {
         self.serviceType = serviceType
-        self.localPeer = clientPeer
-        self.localMCPeerID = MCPeerID(displayName: clientPeer.name)
-        self.sessionCoordinator = sessionCoordinator ?? PeerSessionCoordinator(localPeerID: clientPeer.peerID)
+        self.localPeer = localPeer
+        self.localMCPeerID = MCPeerID(displayName: localPeer.name)
+        self.sessionCoordinator = sessionCoordinator ?? PeerSessionCoordinator(localPeerID: localPeer.peerID)
         self.delegate = delegate
         self.errorPublisher = errorSubject.eraseToAnyPublisher()
         self.serverFoundPublisher = serverFoundSubject.eraseToAnyPublisher()
@@ -114,7 +114,7 @@ public final class PeerBrowser: NSObject, ObservableObject, @unchecked Sendable 
 
 extension PeerBrowser: MCNearbyServiceBrowserDelegate {
     public func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
-        guard let remotePeerID = info?["peerID"] else { return }
+		guard let remotePeerID = info?["peerID"], remotePeerID != localPeer.peerID else { return }
 
         lock.lock()
         let alreadyKnown = nearbyServers.contains(where: { $0.peerID == remotePeerID })
